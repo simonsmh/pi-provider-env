@@ -1,0 +1,18 @@
+{
+  "name": "pi-provider-env",
+  "version": "1.0.0",
+  "description": "Pi extension: registers an OpenAI-compatible provider from environment variables (OPENAI_ENV_BASE_URL, OPENAI_ENV_API_KEY, OPENAI_ENV_MODEL_ID)",
+  "keywords": ["pi-package"],
+  "main": "./extensions/env-provider.ts",
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "pi": {
+    "extensions": ["./extensions"]
+  },
+  "repository": {
+    "type": "git",
+    "url": ""
+  },
+  "license": "MIT"
+}
