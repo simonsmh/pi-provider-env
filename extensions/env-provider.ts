@@ -44,6 +44,8 @@ ensureSystemCATrusted();
  * - OPENAI_ENV_API_KEY: API 密钥（必填）
  * - OPENAI_ENV_MODEL_ID: 模型 ID（可选，不设置则从 /v1/models 获取所有可用模型）
  * - OPENAI_ENV_MODEL_EXTRA: 额外模型配置（JSON 格式，可选）
+ * - OPENAI_ENV_PROVIDER_ID: Provider ID（可选，默认 openai-env）
+ * - OPENAI_ENV_PROVIDER_NAME: Provider 显示名称（可选，默认 OpenAI (Environment)）
  *
  * 示例：
  * export OPENAI_ENV_BASE_URL="https://api.openai.com/v1"
@@ -54,6 +56,8 @@ export default async function (pi: ExtensionAPI) {
   const baseUrl = process.env.OPENAI_ENV_BASE_URL;
   const apiKey = process.env.OPENAI_ENV_API_KEY;
   const modelId = process.env.OPENAI_ENV_MODEL_ID;
+  const providerId = process.env.OPENAI_ENV_PROVIDER_ID ?? "openai-env";
+  const providerName = process.env.OPENAI_ENV_PROVIDER_NAME ?? "OpenAI (Environment)";
 
   // 如果缺少 API 密钥或基础 URL，跳过注册
   if (!apiKey || !baseUrl) {
@@ -135,8 +139,8 @@ export default async function (pi: ExtensionAPI) {
   }
 
   // 注册 provider
-  pi.registerProvider("openai-env", {
-    name: "OpenAI (Environment)",
+  pi.registerProvider(providerId, {
+    name: providerName,
     baseUrl,
     apiKey,
     api: "openai-completions",
