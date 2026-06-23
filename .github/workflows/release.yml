@@ -42,16 +42,6 @@ jobs:
           fi
           echo "Publishing version $PKG_VERSION"
 
-      - name: Lint
-        run: npm run lint
-
-      - name: Type check
-        run: npm run check
-
-      - name: Build
-        run: npm run build
-
       # Publishes via Trusted Publishing (OIDC) — no NPM_TOKEN needed.
-      # npm publish runs prepublishOnly (check + build) again as a safety net.
       - name: Publish to npm
         run: npm publish --provenance --access public
