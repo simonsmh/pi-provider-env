@@ -122,6 +122,12 @@ function resolveCompat(model: ApiModel): PiModelCompat | undefined {
     compat.thinkingFormat = "qwen";
     compat.requiresReasoningContentOnAssistantMessages = true;
   }
+  if (ownedBy === "MINIMAX" || id.includes("minimax")) {
+    // 网关实测：thinking.type 仅支持 adaptive/disabled；reasoning_effort/enable_thinking 无效
+    // Pi 暂无 adaptive/disabled 格式（deepseek 的 enabled 会 400），暂不发送思考控制参数
+    compat.supportsReasoningEffort = false;
+    compat.requiresReasoningContentOnAssistantMessages = true;
+  }
   if (id.includes("deepseek")) {
     compat.requiresReasoningContentOnAssistantMessages = true;
   }
