@@ -1,4 +1,16 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type {
+  Api,
+  AssistantMessageEventStream,
+  Context,
+  Model,
+  SimpleStreamOptions,
+} from "@earendil-works/pi-ai";
+import {
+  createAssistantMessageEventStream,
+  streamSimpleAnthropic,
+  streamSimpleOpenAICompletions,
+} from "@earendil-works/pi-ai";
 import tls from "node:tls";
 
 /**
@@ -37,9 +49,12 @@ function ensureSystemCATrusted(): void {
 ensureSystemCATrusted();
 
 type PiInputModality = "text" | "image";
+type PiThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh";
+type PiThinkingLevelMap = Partial<Record<PiThinkingLevel, string | null>>;
 
 type PiModelCompat = {
   maxTokensField?: "max_completion_tokens" | "max_tokens";
+  supportsDeveloperRole?: boolean;
   supportsReasoningEffort?: boolean;
   thinkingFormat?: "openai" | "qwen" | "deepseek" | "openrouter";
   requiresReasoningContentOnAssistantMessages?: boolean;
@@ -55,6 +70,7 @@ type PiModelDefinition = {
   contextWindow: number;
   maxTokens: number;
   compat?: PiModelCompat;
+  thinkingLevelMap?: PiThinkingLevelMap;
 };
 
 /** OpenAI 兼容 /v1/models 返回的单条模型 */
@@ -104,35 +120,212 @@ function supportsReasoning(model: ApiModel): boolean {
   return model.capabilities?.includes("deepThinking") === true;
 }
 
+function isClaudeModel(model: ApiModel): boolean {
+  const ownedBy = model.owned_by ?? "";
+  const id = model.id.toLowerCase();
+  return ownedBy === "AMAZON_AI" || id.startsWith("claude");
+}
+
+function normalizeModelIdString(id: string): string {
+  return id.toLowerCase().replace(/[\s_.:]+/g, "-");
+}
+
+/** Opus adaptive + /v1/messages：网关实测 max_tokens > 128000 会 400 */
+const OPUS_ADAPTIVE_MAX_TOKENS = 128_000;
+
+/** Opus 4.7/4.8：Pi 未识别 opus-4-8 时会发 budget thinking 导致 400，需 streamSimple 显式 adaptive */
+function isOpusAdaptiveModelId(id: string): boolean {
+  const normalized = normalizeModelIdString(id);
+  return normalized.includes("opus-4-7") || normalized.includes("opus-4-8");
+}
+
+function isOpusAdaptiveClaudeModel(model: ApiModel): boolean {
+  return isOpusAdaptiveModelId(model.id);
+}
+
+/** Sonnet 等：openrouter reasoning.effort 避免 content 内 <think> */
+function usesOpenRouterThinking(model: ApiModel): boolean {
+  return isClaudeModel(model) && supportsReasoning(model) && !isOpusAdaptiveClaudeModel(model);
+}
+
 /** 按网关实测结果设置 Pi compat，避免传错参 */
 function resolveCompat(model: ApiModel): PiModelCompat | undefined {
   const ownedBy = model.owned_by ?? "";
   const id = model.id.toLowerCase();
   const compat: PiModelCompat = {};
 
+  // 网关仅接受 system/user/assistant/tool；reasoning 模型 Pi 默认发 developer role
+  compat.supportsDeveloperRole = false;
+
+  if (usesOpenRouterThinking(model)) {
+    // 实测：reasoning_effort → content 内 <think>；reasoning.effort 正常
+    compat.thinkingFormat = "openrouter";
+    compat.supportsReasoningEffort = false;
+  }
   if (ownedBy === "OPENAI" || id.startsWith("gpt")) {
     compat.maxTokensField = "max_completion_tokens";
   }
-  if (ownedBy === "AMAZON_AI" || id.startsWith("claude")) {
-    // 网关走 Bedrock Converse，Pi 默认 reasoning_effort 会 400
-    compat.supportsReasoningEffort = false;
-  }
   if (ownedBy === "ALI_QWEN" || id.includes("qwen")) {
-    // 网关实测：enable_thinking 可开关思考；reasoning_effort 无法可靠关闭默认思考
-    compat.thinkingFormat = "qwen";
+    // 实测：reasoning_effort=none/minimal 关思考；enable_thinking 也可用，统一走 reasoning_effort
     compat.requiresReasoningContentOnAssistantMessages = true;
   }
   if (ownedBy === "MINIMAX" || id.includes("minimax")) {
-    // 网关实测：thinking.type 仅支持 adaptive/disabled；reasoning_effort/enable_thinking 无效
-    // Pi 暂无 adaptive/disabled 格式（deepseek 的 enabled 会 400），暂不发送思考控制参数
+    // 实测：仅 thinking.type adaptive/disabled 有效；Pi 暂无 adaptive 格式
     compat.supportsReasoningEffort = false;
     compat.requiresReasoningContentOnAssistantMessages = true;
   }
   if (id.includes("deepseek")) {
+    // 实测：thinking.type enabled/disabled 可开关；reasoning_effort 不接受 minimal
+    compat.thinkingFormat = "deepseek";
     compat.requiresReasoningContentOnAssistantMessages = true;
   }
 
   return Object.keys(compat).length > 0 ? compat : undefined;
+}
+
+/** 按网关实测配置 Pi 思考档位映射（null=隐藏，string=覆盖传参值，off=关思考时发送） */
+function resolveThinkingLevelMap(model: ApiModel): PiThinkingLevelMap | undefined {
+  if (!supportsReasoning(model)) {
+    return undefined;
+  }
+
+  const ownedBy = model.owned_by ?? "";
+  const id = model.id.toLowerCase();
+
+  // Claude Opus 4.7/4.8：off 不发 thinking.disabled；Pi 内置 xhigh 映射
+  if (isOpusAdaptiveClaudeModel(model)) {
+    return { off: null, minimal: null };
+  }
+
+  // Claude Sonnet 等：openrouter reasoning.effort；off→none
+  if (usesOpenRouterThinking(model)) {
+    return { off: "none", minimal: null };
+  }
+
+  // Qwen：none/minimal/low~xhigh；不接受 max
+  if (ownedBy === "ALI_QWEN" || id.includes("qwen")) {
+    return {
+      off: "none",
+      minimal: null,
+      xhigh: "xhigh",
+    };
+  }
+
+  // DeepSeek：low~max；不接受 minimal；xhigh→max
+  if (id.includes("deepseek")) {
+    return {
+      minimal: null,
+      xhigh: "max",
+    };
+  }
+
+  // Kimi：none/minimal~xhigh；不接受 max
+  if (ownedBy === "MOONSHOT_AI" || id.includes("kimi")) {
+    return {
+      off: "minimal",
+      xhigh: "xhigh",
+    };
+  }
+
+  // GPT：minimal~xhigh；上游不接受 max
+  if (ownedBy === "OPENAI" || id.startsWith("gpt")) {
+    return {
+      xhigh: "xhigh",
+    };
+  }
+
+  // MiniMax：Pi 暂无法发 thinking.type=adaptive，仅保留 off
+  if (ownedBy === "MINIMAX" || id.includes("minimax")) {
+    return {
+      minimal: null,
+      low: null,
+      medium: null,
+      high: null,
+      xhigh: null,
+    };
+  }
+
+  return { xhigh: "xhigh", minimal: null };
+}
+
+function stripTrailingSlash(url: string): string {
+  return url.replace(/\/+$/, "");
+}
+
+/** 网关根地址（无 /v1）；Pi anthropic-messages 会拼 /v1/messages */
+function toGatewayOrigin(baseUrl: string): string {
+  return stripTrailingSlash(baseUrl).replace(/\/v1$/i, "");
+}
+
+/** OpenAI 兼容 base（带 /v1）；用户配置可带或不带 /v1，统一归一化 */
+function toOpenAiCompatBase(baseUrl: string): string {
+  return `${toGatewayOrigin(baseUrl)}/v1`;
+}
+
+/** Opus 开思考时走 /v1/messages adaptive；其余走 openai-completions */
+function createStreamEnvProvider(gatewayOrigin: string) {
+  return function streamEnvProvider(
+    model: Model<Api>,
+    context: Context,
+    options?: SimpleStreamOptions,
+  ): AssistantMessageEventStream {
+    const stream = createAssistantMessageEventStream();
+
+    (async () => {
+      try {
+        const useOpusAnthropic =
+          model.reasoning && options?.reasoning && isOpusAdaptiveModelId(model.id);
+
+        const innerStream = useOpusAnthropic
+          ? streamSimpleAnthropic(
+            {
+              ...(model as Model<"anthropic-messages">),
+              api: "anthropic-messages",
+              baseUrl: gatewayOrigin,
+              maxTokens: Math.min(model.maxTokens, OPUS_ADAPTIVE_MAX_TOKENS),
+              compat: {
+                ...(model as Model<"anthropic-messages">).compat,
+                forceAdaptiveThinking: true,
+              },
+            },
+            context,
+            options,
+          )
+          : streamSimpleOpenAICompletions(model as Model<"openai-completions">, context, options);
+
+        for await (const event of innerStream) {
+          stream.push(event);
+        }
+        stream.end();
+      } catch (error) {
+        stream.push({
+          type: "error",
+          reason: "error",
+          error: {
+            role: "assistant",
+            content: [],
+            api: model.api,
+            provider: model.provider,
+            model: model.id,
+            usage: {
+              input: 0,
+              output: 0,
+              cacheRead: 0,
+              cacheWrite: 0,
+              totalTokens: 0,
+              cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+            },
+            stopReason: "error",
+            errorMessage: error instanceof Error ? error.message : String(error),
+            timestamp: Date.now(),
+          },
+        });
+        stream.end();
+      }
+    })();
+
+    return stream;
+  };
 }
 
 function mapApiModelToPiModel(
@@ -140,6 +333,7 @@ function mapApiModelToPiModel(
   defaults: { contextWindow: number; maxTokens: number },
 ): PiModelDefinition {
   const compat = resolveCompat(model);
+  const thinkingLevelMap = resolveThinkingLevelMap(model);
   return {
     id: model.id,
     name: model.id,
@@ -152,8 +346,11 @@ function mapApiModelToPiModel(
       cacheWrite: 0,
     },
     contextWindow: model.context_window ?? defaults.contextWindow,
-    maxTokens: model.max_tokens ?? defaults.maxTokens,
+    maxTokens: isOpusAdaptiveClaudeModel(model)
+      ? Math.min(model.max_tokens ?? defaults.maxTokens, OPUS_ADAPTIVE_MAX_TOKENS)
+      : (model.max_tokens ?? defaults.maxTokens),
     ...(compat ? { compat } : {}),
+    ...(thinkingLevelMap ? { thinkingLevelMap } : {}),
   };
 }
 
@@ -161,7 +358,7 @@ function mapApiModelToPiModel(
  * Pi 插件：从环境变量读取 OpenAI 兼容 API 配置
  *
  * 环境变量：
- * - OPENAI_ENV_BASE_URL: API 基础 URL（必填）
+ * - OPENAI_ENV_BASE_URL: API 基础 URL（必填，可带或不带 /v1）
  * - OPENAI_ENV_API_KEY: API 密钥（必填）
  * - OPENAI_ENV_MODEL_ID: 模型 ID（可选，不设置则从 /v1/models 获取所有可用模型）
  * - OPENAI_ENV_MODEL_EXTRA: 额外模型配置（JSON 格式，可选）
@@ -200,9 +397,12 @@ export default async function (pi: ExtensionAPI) {
     maxTokens: (extraConfig.maxTokens as number) ?? 384_000,
   };
 
+  const openAiCompatBase = toOpenAiCompatBase(baseUrl);
+  const gatewayOrigin = toGatewayOrigin(baseUrl);
+
   let apiModels: ApiModel[] = [];
   try {
-    const response = await fetch(`${baseUrl}/models`, {
+    const response = await fetch(`${openAiCompatBase}/models`, {
       headers: {
         Authorization: `Bearer ${apiKey}`,
       },
@@ -232,9 +432,10 @@ export default async function (pi: ExtensionAPI) {
   // 注册 provider
   pi.registerProvider(providerId, {
     name: providerName,
-    baseUrl,
+    baseUrl: openAiCompatBase,
     apiKey,
     api: "openai-completions",
+    streamSimple: createStreamEnvProvider(gatewayOrigin),
     models,
   });
 }
