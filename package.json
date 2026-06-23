@@ -1,7 +1,7 @@
 {
   "name": "pi-provider-env",
-  "version": "1.0.3",
-  "description": "Pi extension: registers an OpenAI-compatible provider from environment variables (OPENAI_ENV_BASE_URL, OPENAI_ENV_API_KEY, OPENAI_ENV_MODEL_ID)",
+  "version": "1.0.4",
+  "description": "Pi extension: registers OpenAI-completions and/or Anthropic-messages providers from environment variables (OPENAI_ENV_*, ANTHROPIC_ENV_*)",
   "author": "Simon Shi <simonsmh@gmail.com>",
   "keywords": [
     "pi-package"
