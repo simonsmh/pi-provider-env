@@ -1,3 +1,4 @@
 node_modules/
 *.tgz
 .mcp.json
+.DS_Store

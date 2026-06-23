@@ -36,6 +36,121 @@ function ensureSystemCATrusted(): void {
 
 ensureSystemCATrusted();
 
+type PiInputModality = "text" | "image";
+
+type PiModelCompat = {
+  maxTokensField?: "max_completion_tokens" | "max_tokens";
+  supportsReasoningEffort?: boolean;
+  thinkingFormat?: "openai" | "qwen" | "deepseek" | "openrouter";
+  requiresReasoningContentOnAssistantMessages?: boolean;
+};
+
+type PiModelDefinition = {
+  id: string;
+  name: string;
+  reasoning: boolean;
+  input: PiInputModality[];
+  /** 单位：元/百万 token */
+  cost: { input: number; output: number; cacheRead: number; cacheWrite: number };
+  contextWindow: number;
+  maxTokens: number;
+  compat?: PiModelCompat;
+};
+
+/** OpenAI 兼容 /v1/models 返回的单条模型 */
+type ApiModel = {
+  id: string;
+  name?: string;
+  owned_by?: string;
+  context_window?: number;
+  max_tokens?: number;
+  status?: string;
+  architecture?: {
+    input_modalities?: string[];
+  };
+  pricing?: {
+    prompt?: string | null;
+    completion?: string | null;
+  };
+  capabilities?: string[];
+  supported_parameters?: string[];
+};
+
+/** 接口 pricing 为 元/token；Pi cost 为 元/百万 token */
+function parsePricingPerMillion(value: string | null | undefined): number {
+  if (value == null) {
+    return 0;
+  }
+  const n = Number.parseFloat(value);
+  return Number.isFinite(n) ? n * 1_000_000 : 0;
+}
+
+function mapInputModalities(modalities?: string[]): PiInputModality[] {
+  if (!modalities?.length) {
+    return ["text"];
+  }
+  const input: PiInputModality[] = [];
+  if (modalities.includes("text")) {
+    input.push("text");
+  }
+  if (modalities.includes("image")) {
+    input.push("image");
+  }
+  return input.length > 0 ? input : ["text"];
+}
+
+/** Pi 模型能力标记：是否支持 extended thinking（非 API 参数名） */
+function supportsReasoning(model: ApiModel): boolean {
+  return model.capabilities?.includes("deepThinking") === true;
+}
+
+/** 按网关实测结果设置 Pi compat，避免传错参 */
+function resolveCompat(model: ApiModel): PiModelCompat | undefined {
+  const ownedBy = model.owned_by ?? "";
+  const id = model.id.toLowerCase();
+  const compat: PiModelCompat = {};
+
+  if (ownedBy === "OPENAI" || id.startsWith("gpt")) {
+    compat.maxTokensField = "max_completion_tokens";
+  }
+  if (ownedBy === "AMAZON_AI" || id.startsWith("claude")) {
+    // 网关走 Bedrock Converse，Pi 默认 reasoning_effort 会 400
+    compat.supportsReasoningEffort = false;
+  }
+  if (ownedBy === "ALI_QWEN" || id.includes("qwen")) {
+    // 网关实测：enable_thinking 可开关思考；reasoning_effort 无法可靠关闭默认思考
+    compat.thinkingFormat = "qwen";
+    compat.requiresReasoningContentOnAssistantMessages = true;
+  }
+  if (id.includes("deepseek")) {
+    compat.requiresReasoningContentOnAssistantMessages = true;
+  }
+
+  return Object.keys(compat).length > 0 ? compat : undefined;
+}
+
+function mapApiModelToPiModel(
+  model: ApiModel,
+  defaults: { contextWindow: number; maxTokens: number },
+): PiModelDefinition {
+  const compat = resolveCompat(model);
+  return {
+    id: model.id,
+    name: model.id,
+    reasoning: supportsReasoning(model),
+    input: mapInputModalities(model.architecture?.input_modalities),
+    cost: {
+      input: parsePricingPerMillion(model.pricing?.prompt),
+      output: parsePricingPerMillion(model.pricing?.completion),
+      cacheRead: 0,
+      cacheWrite: 0,
+    },
+    contextWindow: model.context_window ?? defaults.contextWindow,
+    maxTokens: model.max_tokens ?? defaults.maxTokens,
+    ...(compat ? { compat } : {}),
+  };
+}
+
 /**
  * Pi 插件：从环境变量读取 OpenAI 兼容 API 配置
  *
@@ -74,63 +189,33 @@ export default async function (pi: ExtensionAPI) {
     }
   }
 
-  // 获取模型列表
-  let models: Array<{
-    id: string;
-    name: string;
-    reasoning: boolean;
-    input: string[];
-    cost: { input: number; output: number; cacheRead: number; cacheWrite: number };
-    contextWindow: number;
-    maxTokens: number;
-  }> = [];
+  const modelDefaults = {
+    contextWindow: (extraConfig.contextWindow as number) ?? 1_000_000,
+    maxTokens: (extraConfig.maxTokens as number) ?? 384_000,
+  };
+
+  let apiModels: ApiModel[] = [];
+  try {
+    const response = await fetch(`${baseUrl}/models`, {
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+      },
+    });
+    if (response.ok) {
+      const data = (await response.json()) as { data: ApiModel[] };
+      apiModels = data.data.filter((model) => !model.status || model.status === "online");
+    }
+  } catch (error) {
+    console.error("Failed to fetch models:", error);
+  }
+
+  let models: PiModelDefinition[] = [];
 
   if (modelId) {
-    // 指定了模型 ID，只注册该模型
-    models = [
-      {
-        id: modelId,
-        name: modelId,
-        reasoning: false,
-        input: ["text", "image"],
-        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-        contextWindow: (extraConfig.contextWindow as number) ?? 1000000,
-        maxTokens: (extraConfig.maxTokens as number) ?? 384000,
-      },
-    ];
+    const found = apiModels.find((model) => model.id === modelId);
+    models = [mapApiModelToPiModel(found ?? { id: modelId }, modelDefaults)];
   } else {
-    // 未指定模型 ID，从 /v1/models 获取所有可用模型
-    try {
-      const response = await fetch(`${baseUrl}/models`, {
-        headers: {
-          Authorization: `Bearer ${apiKey}`,
-        },
-      });
-
-      if (response.ok) {
-        const data = (await response.json()) as {
-          data: Array<{
-            id: string;
-            name?: string;
-            context_window?: number;
-            max_tokens?: number;
-          }>;
-        };
-
-        models = data.data.map((model) => ({
-          id: model.id,
-          name: model.name ?? model.id,
-          reasoning: false,
-          input: ["text", "image"],
-          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-          contextWindow: model.context_window ?? (extraConfig.contextWindow as number) ?? 1000000,
-          maxTokens: model.max_tokens ?? (extraConfig.maxTokens as number) ?? 384000,
-        }));
-      }
-    } catch (error) {
-      // 获取模型列表失败，忽略
-      console.error("Failed to fetch models:", error);
-    }
+    models = apiModels.map((model) => mapApiModelToPiModel(model, modelDefaults));
   }
 
   // 如果没有模型，跳过注册
