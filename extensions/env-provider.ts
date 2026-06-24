@@ -1,16 +1,4 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import type {
-  Api,
-  AssistantMessageEventStream,
-  Context,
-  Model,
-  SimpleStreamOptions,
-} from "@earendil-works/pi-ai";
-import {
-  createAssistantMessageEventStream,
-  streamSimpleAnthropic,
-  streamSimpleOpenAICompletions,
-} from "@earendil-works/pi-ai";
 import tls from "node:tls";
 
 /**
@@ -279,8 +267,10 @@ function parseModelDefaults(
 // =============================================================================
 // openai-completions provider（OPENAI_ENV_*）
 //
-// 保留原有混合实现：默认走 openai-completions；Opus 4.7/4.8 开思考时由
-// createStreamEnvProvider 改走 /v1/messages 的 adaptive thinking。
+// 全部走标准 openai-completions（Pi 内置流式实现，无自定义 streamSimple）。
+// Opus 4.7/4.8 与 GPT 系列在本路标记为不支持思考（见 isOpenAiThinkingUnsupported）：
+// 前者思考需 anthropic adaptive，后者网关 chat/completions 不支持 reasoning_effort+tools。
+// 需要它们的思考能力请使用 anthropic-env。
 // =============================================================================
 
 /** Sonnet 等：openrouter reasoning.effort 避免 content 内 <think> */
@@ -388,82 +378,28 @@ function resolveOpenAiThinkingLevelMap(model: ApiModel): PiThinkingLevelMap | un
   return { xhigh: "xhigh", minimal: null };
 }
 
-/** Opus 开思考时走 /v1/messages adaptive；其余走 openai-completions */
-function createStreamEnvProvider(gatewayOrigin: string) {
-  return function streamEnvProvider(
-    model: Model<Api>,
-    context: Context,
-    options?: SimpleStreamOptions,
-  ): AssistantMessageEventStream {
-    const stream = createAssistantMessageEventStream();
-
-    (async () => {
-      try {
-        const useOpusAnthropic =
-          model.reasoning && options?.reasoning && isOpusAdaptiveModelId(model.id);
-
-        const innerStream = useOpusAnthropic
-          ? streamSimpleAnthropic(
-            {
-              ...(model as Model<"anthropic-messages">),
-              api: "anthropic-messages",
-              baseUrl: gatewayOrigin,
-              maxTokens: Math.min(model.maxTokens, OPUS_ADAPTIVE_MAX_TOKENS),
-              compat: {
-                ...(model as Model<"anthropic-messages">).compat,
-                forceAdaptiveThinking: true,
-              },
-            },
-            context,
-            options,
-          )
-          : streamSimpleOpenAICompletions(model as Model<"openai-completions">, context, options);
-
-        for await (const event of innerStream) {
-          stream.push(event);
-        }
-        stream.end();
-      } catch (error) {
-        stream.push({
-          type: "error",
-          reason: "error",
-          error: {
-            role: "assistant",
-            content: [],
-            api: model.api,
-            provider: model.provider,
-            model: model.id,
-            usage: {
-              input: 0,
-              output: 0,
-              cacheRead: 0,
-              cacheWrite: 0,
-              totalTokens: 0,
-              cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-            },
-            stopReason: "error",
-            errorMessage: error instanceof Error ? error.message : String(error),
-            timestamp: Date.now(),
-          },
-        });
-        stream.end();
-      }
-    })();
-
-    return stream;
-  };
+/**
+ * 在 openai-completions 这条路上不下发思考参数的模型：
+ * - Opus 4.7/4.8：思考依赖 anthropic-messages adaptive thinking，openai-completions 无法表达。
+ * - GPT 系列：网关 /v1/chat/completions 不支持「reasoning_effort + function tools」组合
+ *   （提示用 /v1/responses，但该网关未提供 /v1/responses）。编码场景必带 tools，故关思考。
+ * 这些模型在本路标记为 reasoning:false，走普通 openai-completions；需要其思考请用 anthropic-env。
+ */
+function isOpenAiThinkingUnsupported(model: ApiModel): boolean {
+  return isOpusAdaptiveClaudeModel(model) || normalizeModelIdString(model.id).includes("gpt");
 }
 
 function mapApiModelToOpenAiModel(
   model: ApiModel,
   defaults: { contextWindow: number; maxTokens: number },
 ): PiModelDefinition {
+  const noThinking = isOpenAiThinkingUnsupported(model);
   const compat = resolveOpenAiCompat(model);
-  const thinkingLevelMap = resolveOpenAiThinkingLevelMap(model);
+  const thinkingLevelMap = noThinking ? undefined : resolveOpenAiThinkingLevelMap(model);
   return {
     id: model.id,
     name: model.id,
-    reasoning: supportsReasoning(model),
+    reasoning: noThinking ? false : supportsReasoning(model),
     input: mapInputModalities(model.architecture?.input_modalities),
     cost: {
       input: parsePricingPerMillion(model.pricing?.prompt),
@@ -506,7 +442,6 @@ async function registerOpenAiProvider(pi: ExtensionAPI): Promise<void> {
     GATEWAY_DEFAULT_MAX_TOKENS,
   );
   const openAiCompatBase = toOpenAiCompatBase(baseUrl);
-  const gatewayOrigin = toGatewayOrigin(baseUrl);
 
   const apiModels = await fetchApiModels(openAiCompatBase, apiKey);
 
@@ -527,7 +462,6 @@ async function registerOpenAiProvider(pi: ExtensionAPI): Promise<void> {
     baseUrl: openAiCompatBase,
     apiKey,
     api: "openai-completions",
-    streamSimple: createStreamEnvProvider(gatewayOrigin),
     models,
   });
 }

@@ -2,7 +2,7 @@
 
 Pi extension that registers up to **two independent providers** from environment variables:
 
-- **`OPENAI_ENV_*`** → an OpenAI Chat Completions compatible provider (default id `openai-env`). Opus 4.7/4.8 reasoning is transparently routed to the gateway's `/v1/messages` adaptive-thinking endpoint via a custom stream handler.
+- **`OPENAI_ENV_*`** → an OpenAI Chat Completions compatible provider (default id `openai-env`). Standard `openai-completions` streaming (no custom stream handler). Opus 4.7/4.8 and GPT reasoning models are exposed here **without thinking** (Opus thinking needs the Anthropic adaptive endpoint; GPT `reasoning_effort` + function tools is rejected on this gateway's `/v1/chat/completions`). Use `anthropic-env` if you want Opus reasoning.
 - **`ANTHROPIC_ENV_*`** → an Anthropic Messages compatible provider (default id `anthropic-env`). All models go through pi's built-in `anthropic-messages` API (streaming, thinking, prompt caching handled natively — no custom stream handler).
 
 The two providers are fully independent: each reads only its own variables (no cross-fallback) and is registered only when its `BASE_URL` + credential are present. Set one, the other, or both at the same time.
@@ -42,7 +42,7 @@ The two providers are fully independent: each reads only its own variables (no c
 
 Both providers discover models from the OpenAI-compatible `GET {base}/v1/models` endpoint (authenticated with `Authorization: Bearer`).
 
-Claude Opus 4.7/4.8 are special-cased in both providers: adaptive thinking, `maxTokens` capped at 128000 (gateway returns 400 above this), and the `off`/`minimal` thinking levels suppressed. The OpenAI provider additionally carries per-vendor `compat`/`thinkingLevelMap` tuning (GPT, Qwen, DeepSeek, Kimi, MiniMax) for Chat Completions quirks.
+Claude Opus 4.7/4.8 are special-cased: the **Anthropic provider** uses adaptive thinking with `maxTokens` capped at 128000 (gateway returns 400 above this) and the `off`/`minimal` thinking levels suppressed; the **OpenAI provider** exposes them as non-reasoning models (their thinking can't be expressed over `openai-completions` on this gateway). The OpenAI provider additionally carries per-vendor `compat`/`thinkingLevelMap` tuning (Qwen, DeepSeek, Kimi, MiniMax, GPT) for Chat Completions quirks.
 
 ### max_tokens caps (per endpoint × vendor / category)
 
