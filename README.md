@@ -31,7 +31,7 @@ The two providers are fully independent: each reads only its own variables (no c
 | `ANTHROPIC_ENV_PROVIDER_ID` | No | `anthropic-env` | Provider ID |
 | `ANTHROPIC_ENV_PROVIDER_NAME` | No | `Anthropic (Environment)` | Provider display name |
 
-## Context window limits (1.0.7)
+## Context window limits (1.0.8)
 
 Set `OPENAI_ENV_MODEL_EXTRA='{"contextWindow":200000}'` or
 `ANTHROPIC_ENV_MODEL_EXTRA='{"contextWindow":200000}'` to cap the effective
