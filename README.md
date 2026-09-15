@@ -31,6 +31,19 @@ The two providers are fully independent: each reads only its own variables (no c
 | `ANTHROPIC_ENV_PROVIDER_ID` | No | `anthropic-env` | Provider ID |
 | `ANTHROPIC_ENV_PROVIDER_NAME` | No | `Anthropic (Environment)` | Provider display name |
 
+## Context window limits (1.0.6)
+
+Set `OPENAI_ENV_MODEL_EXTRA='{"contextWindow":200000}'` or
+`ANTHROPIC_ENV_MODEL_EXTRA='{"contextWindow":200000}'` to cap the effective
+context window independently for each provider. The effective window is the
+smaller of this limit and the model API's `context_window` (1,000,000 when absent).
+Without an explicit limit, the existing behavior is unchanged. Limits must be
+positive safe integers; invalid limits or malformed JSON fail extension loading.
+
+This lets Pi's enabled automatic compaction run earlier. The 200,000 value is an
+example, not a verified gateway limit: HTTP 413 limits request bytes, not tokens.
+This change does not recover already oversized histories or alter error forwarding.
+
 ## Auth
 
 - **OpenAI provider:** `Authorization: Bearer <OPENAI_ENV_API_KEY>` (pi's built-in OpenAI auth).

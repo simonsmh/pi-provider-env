@@ -247,7 +247,6 @@ function parseModelDefaults(
   extraRaw: string | undefined,
   fallbackMaxTokens = 384_000,
 ): {
-  contextWindow: number;
   maxTokens: number;
 } {
   let extraConfig: Record<string, unknown> = {};
@@ -259,9 +258,22 @@ function parseModelDefaults(
     }
   }
   return {
-    contextWindow: (extraConfig.contextWindow as number) ?? 1_000_000,
     maxTokens: (extraConfig.maxTokens as number) ?? fallbackMaxTokens,
   };
+}
+
+/** An explicit deployment limit may lower, but never enlarge, the advertised window. */
+function resolveContextWindow(advertised: number | undefined, extraRaw: string | undefined): number {
+  let limit: unknown;
+  if (extraRaw) {
+    const extra = JSON.parse(extraRaw);
+    limit = extra?.contextWindow;
+    if (limit !== undefined && (typeof limit !== "number" || !Number.isSafeInteger(limit) || limit <= 0)) {
+      throw new Error("MODEL_EXTRA.contextWindow must be a positive safe integer");
+    }
+  }
+  const window = advertised ?? 1_000_000;
+  return typeof limit === "number" ? Math.min(window, limit) : window;
 }
 
 // =============================================================================
@@ -391,7 +403,7 @@ function isOpenAiThinkingUnsupported(model: ApiModel): boolean {
 
 function mapApiModelToOpenAiModel(
   model: ApiModel,
-  defaults: { contextWindow: number; maxTokens: number },
+  defaults: { maxTokens: number },
 ): PiModelDefinition {
   const noThinking = isOpenAiThinkingUnsupported(model);
   const compat = resolveOpenAiCompat(model);
@@ -407,7 +419,7 @@ function mapApiModelToOpenAiModel(
       cacheRead: 0,
       cacheWrite: 0,
     },
-    contextWindow: model.context_window ?? defaults.contextWindow,
+    contextWindow: resolveContextWindow(model.context_window, process.env.OPENAI_ENV_MODEL_EXTRA),
     maxTokens: resolveGatewayMaxTokens("openai-completions", model, defaults.maxTokens),
     ...(compat ? { compat } : {}),
     ...(thinkingLevelMap ? { thinkingLevelMap } : {}),
@@ -510,7 +522,7 @@ function isAnthropicUnsupportedModel(model: ApiModel): boolean {
 
 function mapApiModelToAnthropicModel(
   model: ApiModel,
-  defaults: { contextWindow: number; maxTokens: number },
+  defaults: { maxTokens: number },
 ): PiModelDefinition {
   const compat = resolveAnthropicCompat(model);
   const thinkingLevelMap = resolveAnthropicThinkingLevelMap(model);
@@ -525,7 +537,7 @@ function mapApiModelToAnthropicModel(
       cacheRead: 0,
       cacheWrite: 0,
     },
-    contextWindow: model.context_window ?? defaults.contextWindow,
+    contextWindow: resolveContextWindow(model.context_window, process.env.ANTHROPIC_ENV_MODEL_EXTRA),
     maxTokens: resolveGatewayMaxTokens("anthropic-messages", model, defaults.maxTokens),
     ...(compat ? { compat } : {}),
     ...(thinkingLevelMap ? { thinkingLevelMap } : {}),

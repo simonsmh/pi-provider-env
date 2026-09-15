@@ -1,6 +1,6 @@
 {
   "name": "pi-provider-env",
-  "version": "1.0.5",
+  "version": "1.0.6",
   "description": "Pi extension: registers OpenAI-completions and/or Anthropic-messages providers from environment variables (OPENAI_ENV_*, ANTHROPIC_ENV_*)",
   "author": "Simon Shi <simonsmh@gmail.com>",
   "keywords": [
@@ -22,6 +22,7 @@
   },
   "license": "MIT",
   "scripts": {
+    "test": "node --test tests/*.test.cjs",
     "lint": "tsc --noEmit",
     "check": "tsc --noEmit",
     "build": "node -e \"process.exit(0)\""
